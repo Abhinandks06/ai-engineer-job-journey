@@ -10,17 +10,25 @@ class LLMService:
         context = "\n\n".join(context_chunks)
 
         prompt = f"""
-You are an AI assistant. Answer the question using ONLY the context below.
-If the answer is not present in the context, say "I don't know based on the provided context."
+        Use ONLY the information provided in the context below.
+        Do NOT mention yourself, the model, or the context.
+        Do NOT say phrases like "as an AI assistant".
 
-Context:
-{context}
+        If the answer is not present, say:
+        "I don't know based on the provided context."
 
-Question:
-{question}
+        If the user asks for a summary:
+        - Write 2–3 concise professional sentences
+        - Make it suitable for a recruiter
 
-Answer:
-""".strip()
+        Context:
+        {context}
+
+        Question:
+        {question}
+
+        Answer:
+        """.strip()
 
         result = subprocess.run(
             ["ollama", "run", self.model_name],

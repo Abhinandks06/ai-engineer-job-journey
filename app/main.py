@@ -1,10 +1,10 @@
 from fastapi import FastAPI
-from app.api.chat import router as chat_router
+from api.v1.routes import rag
 
-app = FastAPI(title="AI Engineer Job Journey")
+app = FastAPI(
+    title="RAG API",
+    description="PDF-based Retrieval Augmented Generation API",
+    version="1.0.0"
+)
 
-app.include_router(chat_router)
-
-@app.get("/")
-def root():
-    return {"message": "FastAPI + Ollama is running"}
+app.include_router(rag.router, prefix="/api/v1/rag", tags=["RAG"])
