@@ -20,6 +20,9 @@ class LLMService:
         If the user asks for a summary:
         - Write 2–3 concise professional sentences
         - Make it suitable for a recruiter
+        If multiple documents mention different answers,
+            list all distinct answers clearly instead of choosing only one.
+
 
         Context:
         {context}

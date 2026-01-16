@@ -1,3 +1,4 @@
+import os
 from typing import List, Dict
 
 
@@ -24,9 +25,13 @@ class ChunkingService:
                 chunk_text = text[start:end]
 
                 chunks.append({
-                    "text": chunk_text,
-                    "metadata": metadata
-                })
+                "text": chunk_text,
+                "metadata": {
+                    "doc_id": os.path.basename(doc["metadata"]["source"]),
+                    "source": doc["metadata"]["source"],
+                    "page": doc["metadata"]["page"]
+                }
+            })
 
                 start = end - self.overlap
 
