@@ -10,30 +10,37 @@ from rag_basics.llm_service import LLMService
 
 router = APIRouter()
 
+# Persistence paths
 INDEX_PATH = "data/faiss.index"
 METADATA_PATH = "data/chunks.json"
 
-# Directory to store uploaded PDFs
+# Upload directory
 UPLOAD_DIR = "data/uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-# Initialize shared services (in-memory RAG)
+# Services
 embedding_service = EmbeddingService()
 chunker = ChunkingService()
 llm_service = LLMService()
 
+# Vector store
 vector_store: Optional[FAISSVectorStore] = None
 
+# Retrieval quality control
+MIN_SIMILARITY_SCORE = 0.18
+
+# Load persisted index on startup
 if os.path.exists(INDEX_PATH) and os.path.exists(METADATA_PATH):
     vector_store = FAISSVectorStore.load(INDEX_PATH, METADATA_PATH)
 else:
     vector_store = None
 
+
 @router.post("/upload-pdf")
 async def upload_pdf(file: UploadFile = File(...)):
     """
     Upload a PDF, extract text, chunk it, embed it,
-    and store embeddings in FAISS.
+    and store embeddings in FAISS (persistent).
     """
     global vector_store
 
@@ -58,12 +65,12 @@ async def upload_pdf(file: UploadFile = File(...)):
     texts = [chunk["text"] for chunk in chunks]
     embeddings = embedding_service.embed_texts(texts)
 
+    # Initialize or append to vector store
     if vector_store is None:
         vector_store = FAISSVectorStore(embedding_dim=embeddings.shape[1])
 
     vector_store.add_embeddings(embeddings, chunks)
     vector_store.save(INDEX_PATH, METADATA_PATH)
-
 
     return {
         "message": "PDF uploaded and indexed successfully",
@@ -73,10 +80,10 @@ async def upload_pdf(file: UploadFile = File(...)):
 
 
 @router.post("/ask")
-async def ask_question(question: str, doc_id: str | None = None):
+async def ask_question(question: str, doc_id: Optional[str] = None):
     """
-    Ask a question against the indexed PDFs using RAG.
-    Optionally filter by document ID.
+    Ask a question against indexed PDFs using
+    confidence-aware RAG with optional document filtering.
     """
     if vector_store is None:
         raise HTTPException(status_code=400, detail="No documents indexed yet")
@@ -84,33 +91,42 @@ async def ask_question(question: str, doc_id: str | None = None):
     # Embed query
     query_embedding = embedding_service.embed_query(question)
 
-    # Retrieve relevant chunks
-    retrieved_chunks = vector_store.search(query_embedding, top_k=5)
+    # Retrieve chunks with similarity scores
+    retrieved = vector_store.search(query_embedding, top_k=5)
+
+    # Apply similarity threshold
+    filtered = [
+        r for r in retrieved
+        if r["score"] >= MIN_SIMILARITY_SCORE
+    ]
 
     # Optional document-level filtering
     if doc_id:
-        retrieved_chunks = [
-            chunk for chunk in retrieved_chunks
-            if chunk["metadata"].get("doc_id") == doc_id
+        filtered = [
+            r for r in filtered
+            if r["chunk"]["metadata"].get("doc_id") == doc_id
         ]
 
-    if not retrieved_chunks:
+    if not filtered:
         return {
             "question": question,
             "answer": "I don't know based on the provided context.",
             "sources": []
         }
 
-    # Generate answer using retrieved context
+    # Extract final chunks
+    final_chunks = [r["chunk"] for r in filtered]
+
+    # Generate grounded answer
     answer = llm_service.generate_answer(
         question,
-        [chunk["text"] for chunk in retrieved_chunks]
+        [chunk["text"] for chunk in final_chunks]
     )
 
-    # Deduplicate sources (by source + page)
+    # Deduplicate sources
     unique_sources = {
         (chunk["metadata"]["source"], chunk["metadata"]["page"]): chunk["metadata"]
-        for chunk in retrieved_chunks
+        for chunk in final_chunks
     }
 
     return {
@@ -118,4 +134,3 @@ async def ask_question(question: str, doc_id: str | None = None):
         "answer": answer,
         "sources": list(unique_sources.values())
     }
-
