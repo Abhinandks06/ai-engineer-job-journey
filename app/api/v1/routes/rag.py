@@ -2,12 +2,14 @@ from fastapi import APIRouter, UploadFile, File, HTTPException, BackgroundTasks
 import os
 from typing import Optional
 from threading import Lock
-
+from auth import get_current_user
+from fastapi import Depends
 from rag_basics.document_loader import PDFLoader
 from rag_basics.chunking_service import ChunkingService
 from rag_basics.embeddings import EmbeddingService
 from rag_basics.vector_store import FAISSVectorStore
 from rag_basics.llm_service import LLMService
+from policy import check_upload_quota, check_query_rate
 
 
 # =========================
@@ -123,12 +125,15 @@ def is_refusal(answer: str) -> bool:
 # Upload endpoint
 # =========================
 
-@router.post("/users/{user_id}/upload-pdf")
+@router.post("/upload-pdf")
 async def upload_pdf(
-    user_id: str,
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
+    current_user: dict = Depends(get_current_user),
 ):
+    user_id = current_user["username"]
+    check_upload_quota(user_id)
+    
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported")
 
@@ -174,12 +179,14 @@ async def upload_pdf(
 # Query endpoint
 # =========================
 
-@router.post("/users/{user_id}/ask")
+@router.post("/ask")
 async def ask_question(
-    user_id: str,
     question: str,
     doc_id: Optional[str] = None,
+    current_user: dict = Depends(get_current_user),
 ):
+    user_id = current_user["username"]
+    check_query_rate(user_id)
     vector_store = get_user_vector_store(user_id)
 
     if vector_store is None:
