@@ -1,16 +1,20 @@
-from fastapi import APIRouter, UploadFile, File, HTTPException, BackgroundTasks
+from fastapi import APIRouter, UploadFile, File, HTTPException, BackgroundTasks, Depends
 import os
 from typing import Optional
 from threading import Lock
-from auth import get_current_user
-from fastapi import Depends
+
 from rag_basics.document_loader import PDFLoader
 from rag_basics.chunking_service import ChunkingService
 from rag_basics.embeddings import EmbeddingService
 from rag_basics.vector_store import FAISSVectorStore
 from rag_basics.llm_service import LLMService
-from policy import check_upload_quota, check_query_rate
 
+from auth import get_current_user
+from policy import check_upload_quota, check_query_rate
+from evaluation import log_retrieval_metrics, log_answer_outcome
+
+
+DEBUG_MODE = True  # set False in production
 
 # =========================
 # User-scoped storage utils
@@ -47,7 +51,7 @@ router = APIRouter()
 
 
 # =========================
-# Services (shared, stateless)
+# Services (stateless)
 # =========================
 
 embedding_service = EmbeddingService()
@@ -76,9 +80,9 @@ def get_user_vector_store(user_id: str) -> Optional[FAISSVectorStore]:
     index_path, metadata_path = get_user_vector_paths(user_id)
 
     if os.path.exists(index_path) and os.path.exists(metadata_path):
-        vector_store = FAISSVectorStore.load(index_path, metadata_path)
-        vector_stores[user_id] = vector_store
-        return vector_store
+        store = FAISSVectorStore.load(index_path, metadata_path)
+        vector_stores[user_id] = store
+        return store
 
     return None
 
@@ -90,35 +94,46 @@ def get_user_vector_store(user_id: str) -> Optional[FAISSVectorStore]:
 MIN_SIMILARITY_SCORE = 0.15
 
 
+def is_refusal(answer: str) -> bool:
+    return answer.strip().lower().startswith("i don't know")
+
+
 def normalize_question(question: str) -> str:
     q = question.strip().lower()
 
-    vague_summary_phrases = [
+    summary_triggers = [
+        "what is the content",
+        "what is the content in this pdf",
+        "what is the content in the pdf",
+        "what is this pdf about",
         "explain this pdf",
         "explain this document",
-        "explain this",
         "summarize this pdf",
         "summarize this document",
-        "what is this pdf about",
+        "what is in this document",
     ]
 
-    if q in vague_summary_phrases:
-        return "Provide a concise summary of the main topics covered in this document."
+    for trigger in summary_triggers:
+        if trigger in q:
+            return "Provide a concise summary of the main topics covered in this document."
 
     return question
 
 
-def is_refusal(answer: str) -> bool:
-    normalized = answer.strip().lower()
+def deduplicate_chunks(retrieved: list) -> list:
+    """
+    Keep only the highest-score chunk per (doc_id, page).
+    """
+    best_per_page = {}
 
-    refusal_phrases = [
-        "i don't know",
-        "i do not know",
-        "not present in the provided context",
-        "cannot be determined from the context",
-    ]
+    for r in retrieved:
+        meta = r["chunk"]["metadata"]
+        key = (meta.get("doc_id"), meta.get("page"))
 
-    return any(phrase in normalized for phrase in refusal_phrases)
+        if key not in best_per_page or r["score"] > best_per_page[key]["score"]:
+            best_per_page[key] = r
+
+    return list(best_per_page.values())
 
 
 # =========================
@@ -132,8 +147,9 @@ async def upload_pdf(
     current_user: dict = Depends(get_current_user),
 ):
     user_id = current_user["username"]
+
     check_upload_quota(user_id)
-    
+
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported")
 
@@ -176,7 +192,7 @@ async def upload_pdf(
 
 
 # =========================
-# Query endpoint
+# Ask endpoint
 # =========================
 
 @router.post("/ask")
@@ -186,20 +202,34 @@ async def ask_question(
     current_user: dict = Depends(get_current_user),
 ):
     user_id = current_user["username"]
-    check_query_rate(user_id)
-    vector_store = get_user_vector_store(user_id)
 
+    check_query_rate(user_id)
+
+    vector_store = get_user_vector_store(user_id)
     if vector_store is None:
         raise HTTPException(
             status_code=400,
             detail="No documents indexed yet for this user",
         )
 
-    query_embedding = embedding_service.embed_query(question)
+    normalized_question = normalize_question(question)
+    if normalized_question != question:
+        print(f"[RAG INTENT NORMALIZED] '{question}' → '{normalized_question}'")
+
+    query_embedding = embedding_service.embed_query(normalized_question)
 
     lock = get_user_lock(user_id)
     with lock:
         retrieved = vector_store.search(query_embedding, top_k=5)
+
+    retrieved = deduplicate_chunks(retrieved)
+
+    log_retrieval_metrics(
+        user_id=user_id,
+        question=question,
+        retrieved=retrieved,
+        threshold=MIN_SIMILARITY_SCORE,
+    )
 
     filtered = [
         r for r in retrieved
@@ -213,23 +243,25 @@ async def ask_question(
         ]
 
     if not filtered:
+        answer = "I don't know based on the provided context."
+
+        log_answer_outcome(user_id, question, answer)
+
         return {
             "question": question,
-            "answer": "I don't know based on the provided context.",
+            "answer": answer,
             "sources": [],
         }
 
     final_chunks = [r["chunk"] for r in filtered]
 
-    normalized_question = normalize_question(question)
-
     answer = llm_service.generate_answer(
-        normalized_question,
+        question,
         [chunk["text"] for chunk in final_chunks],
     )
 
-    # ✅ Confidence-aware refusal handling
     if is_refusal(answer):
+        log_answer_outcome(user_id, question, answer)
         return {
             "question": question,
             "answer": answer,
@@ -241,10 +273,70 @@ async def ask_question(
         for chunk in final_chunks
     }
 
+    log_answer_outcome(user_id, question, answer)
+
     return {
         "question": question,
         "answer": answer,
         "sources": list(unique_sources.values()),
+    }
+
+
+# =========================
+# Debug endpoint (dev-only)
+# =========================
+
+@router.post("/debug/ask")
+async def debug_ask(
+    question: str,
+    doc_id: Optional[str] = None,
+    current_user: dict = Depends(get_current_user),
+):
+    if not DEBUG_MODE:
+        raise HTTPException(status_code=404, detail="Not found")
+
+    user_id = current_user["username"]
+
+    vector_store = get_user_vector_store(user_id)
+    if vector_store is None:
+        raise HTTPException(
+            status_code=400,
+            detail="No documents indexed yet for this user",
+        )
+
+    normalized_question = normalize_question(question)
+    if normalized_question != question:
+        print(f"[RAG INTENT NORMALIZED] '{question}' → '{normalized_question}'")
+
+    query_embedding = embedding_service.embed_query(normalized_question)
+
+    lock = get_user_lock(user_id)
+    with lock:
+        retrieved = vector_store.search(query_embedding, top_k=5)
+
+    retrieved = deduplicate_chunks(retrieved)
+
+    if doc_id:
+        retrieved = [
+            r for r in retrieved
+            if r["chunk"]["metadata"].get("doc_id") == doc_id
+        ]
+
+    debug_chunks = []
+    for r in retrieved:
+        debug_chunks.append({
+            "score": r["score"],
+            "passed_threshold": r["score"] >= MIN_SIMILARITY_SCORE,
+            "text_preview": r["chunk"]["text"][:300],
+            "metadata": r["chunk"]["metadata"],
+        })
+
+    return {
+        "question": question,
+        "threshold": MIN_SIMILARITY_SCORE,
+        "top_k": 5,
+        "retrieved": debug_chunks,
+        "passed_any": any(c["passed_threshold"] for c in debug_chunks),
     }
 
 
