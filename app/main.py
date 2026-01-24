@@ -1,10 +1,12 @@
 from fastapi import FastAPI
-from api.v1.routes import rag
+from app.api.v1.routes import rag
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.security import OAuth2PasswordRequestForm
 from datetime import timedelta
 
-from auth import authenticate_user, create_access_token
+from app.auth import authenticate_user, create_access_token
+from dotenv import load_dotenv
+load_dotenv()
 
 
 app = FastAPI(

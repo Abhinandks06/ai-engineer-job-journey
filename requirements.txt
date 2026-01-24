@@ -1,0 +1,20 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+fastapi
+uvicorn
+python-multipart
+python-dotenv
+
+python-jose[cryptography]
+passlib[bcrypt]
+
+faiss-cpu
+numpy
+pydantic
+
+pypdf
+
+torch==2.0.1+cpu
+transformers==4.35.2
+sentence-transformers==2.2.2
+huggingface_hub==0.16.4

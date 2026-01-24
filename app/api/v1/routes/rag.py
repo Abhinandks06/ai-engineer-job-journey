@@ -3,18 +3,21 @@ import os
 from typing import Optional
 from threading import Lock
 
-from rag_basics.document_loader import PDFLoader
-from rag_basics.chunking_service import ChunkingService
-from rag_basics.embeddings import EmbeddingService
-from rag_basics.vector_store import FAISSVectorStore
-from rag_basics.llm_service import LLMService
+from app.rag_basics.document_loader import PDFLoader
+from app.rag_basics.chunking_service import ChunkingService
+from app.rag_basics.embeddings import EmbeddingService
+from app.rag_basics.vector_store import FAISSVectorStore
+from app.rag_basics.llm_service import LLMService
 
-from auth import get_current_user
-from policy import check_upload_quota, check_query_rate
-from evaluation import log_retrieval_metrics, log_answer_outcome
+from app.auth import get_current_user
+from app.policy import check_upload_quota, check_query_rate
+from app.evaluation import log_retrieval_metrics, log_answer_outcome
+import os
 
+DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
+MIN_SIMILARITY_SCORE = float(os.getenv("MIN_SIMILARITY_SCORE", 0.15))
+TOP_K = int(os.getenv("TOP_K", 5))
 
-DEBUG_MODE = True  # set False in production
 
 # =========================
 # User-scoped storage utils
@@ -87,11 +90,7 @@ def get_user_vector_store(user_id: str) -> Optional[FAISSVectorStore]:
     return None
 
 
-# =========================
-# Retrieval quality control
-# =========================
 
-MIN_SIMILARITY_SCORE = 0.15
 
 
 def is_refusal(answer: str) -> bool:
@@ -220,7 +219,7 @@ async def ask_question(
 
     lock = get_user_lock(user_id)
     with lock:
-        retrieved = vector_store.search(query_embedding, top_k=5)
+        retrieved = vector_store.search(query_embedding, top_k=TOP_K)
 
     retrieved = deduplicate_chunks(retrieved)
 
@@ -312,7 +311,7 @@ async def debug_ask(
 
     lock = get_user_lock(user_id)
     with lock:
-        retrieved = vector_store.search(query_embedding, top_k=5)
+        retrieved = vector_store.search(query_embedding, top_k=TOP_K)
 
     retrieved = deduplicate_chunks(retrieved)
 

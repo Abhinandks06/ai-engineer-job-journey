@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+import os
 from typing import Optional
 
 from fastapi import Depends, HTTPException, status
@@ -11,34 +12,34 @@ from passlib.context import CryptContext
 # Config
 # =========================
 
-SECRET_KEY = "CHANGE_ME_IN_PRODUCTION"
+SECRET_KEY = os.getenv("SECRET_KEY", "unsafe-default")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
 
 
 # =========================
-# Password hashing (Argon2)
+# Password hashing (bcrypt)
 # =========================
 
 pwd_context = CryptContext(
-    schemes=["argon2"],
+    schemes=["bcrypt"],
     deprecated="auto"
 )
 
 
 # =========================
-# Fake user store (hashed)
+# Fake user store (PRE-HASHED)
 # =========================
-# password = "test123"
+# password for both users = "test123"
 
 fake_users_db = {
     "user1": {
         "username": "user1",
-        "hashed_password": pwd_context.hash("test123"),
+        "hashed_password": "$2b$12$KIXQ4z3Zk6nKx9xRz0N4eO3lXzYpQwZk9K0Z7rXb6r0k9ZpYQw7yG",
     },
     "user2": {
         "username": "user2",
-        "hashed_password": pwd_context.hash("test123"),
+        "hashed_password": "$2b$12$KIXQ4z3Zk6nKx9xRz0N4eO3lXzYpQwZk9K0Z7rXb6r0k9ZpYQw7yG",
     },
 }
 
