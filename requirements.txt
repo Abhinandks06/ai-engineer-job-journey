@@ -1,20 +1,27 @@
---extra-index-url https://download.pytorch.org/whl/cpu
-
 fastapi
 uvicorn
-python-multipart
+
 python-dotenv
+python-multipart
 
-python-jose[cryptography]
-passlib[bcrypt]
-
-faiss-cpu
-numpy
 pydantic
 
-pypdf
+# Auth
+python-jose
+passlib[argon2]
 
-torch==2.0.1+cpu
-transformers==4.35.2
+# RAG
+pypdf
+faiss-cpu
+
+# Embeddings (CPU-safe, pinned)
 sentence-transformers==2.2.2
-huggingface_hub==0.16.4
+transformers==4.37.2
+torch==2.1.2
+
+# 🔒 Critical pins
+numpy<2
+huggingface-hub==0.20.3
+
+# Utilities
+scikit-learn

@@ -1,13 +1,14 @@
-# Virtual environments
-venv/
-.venv/
-
-# Python cache
+# Python
 __pycache__/
 *.pyc
 
-# Environment variables
+# Virtual env
+venv/
 .env
 
-# OS junk
+# OS
 .DS_Store
+Thumbs.db
+
+# Docker
+*.log
