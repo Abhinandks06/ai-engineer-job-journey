@@ -34,10 +34,12 @@ class LLMService:
         """.strip()
 
         result = subprocess.run(
-            ["ollama", "run", self.model_name],
-            input=prompt,
-            text=True,
-            capture_output=True
-        )
+                ["ollama", "run", self.model_name],
+                input=prompt,
+                text=True,
+                capture_output=True,
+                encoding="utf-8",
+                errors="replace",
+            )
 
         return result.stdout.strip()

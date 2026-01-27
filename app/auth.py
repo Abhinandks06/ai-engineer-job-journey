@@ -22,9 +22,10 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 60
 # =========================
 
 pwd_context = CryptContext(
-    schemes=["bcrypt"],
+    schemes=["argon2"],
     deprecated="auto"
 )
+
 
 
 # =========================
@@ -35,11 +36,11 @@ pwd_context = CryptContext(
 fake_users_db = {
     "user1": {
         "username": "user1",
-        "hashed_password": "$2b$12$KIXQ4z3Zk6nKx9xRz0N4eO3lXzYpQwZk9K0Z7rXb6r0k9ZpYQw7yG",
+        "hashed_password": "$argon2id$v=19$m=65536,t=3,p=4$glAKgbA2BuCc03ovZSwFQA$3MdkcVPoBxCVHeNfYRUu55DLO9lgvVBqqklJxzEbxcU",
     },
     "user2": {
         "username": "user2",
-        "hashed_password": "$2b$12$KIXQ4z3Zk6nKx9xRz0N4eO3lXzYpQwZk9K0Z7rXb6r0k9ZpYQw7yG",
+        "hashed_password": "$argon2id$v=19$m=65536,t=3,p=4$glAKgbA2BuCc03ovZSwFQA$3MdkcVPoBxCVHeNfYRUu55DLO9lgvVBqqklJxzEbxcU",
     },
 }
 

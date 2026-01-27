@@ -1,13 +1,12 @@
-from fastapi import FastAPI
-from app.api.v1.routes import rag
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.security import OAuth2PasswordRequestForm
 from datetime import timedelta
-
-from app.auth import authenticate_user, create_access_token
 from dotenv import load_dotenv
-load_dotenv()
 
+from app.api.v1.routes import api_router
+from app.auth import authenticate_user, create_access_token
+
+load_dotenv()
 
 app = FastAPI(
     title="RAG API",
@@ -15,7 +14,8 @@ app = FastAPI(
     version="1.0.0"
 )
 
-app.include_router(rag.router, prefix="/api/v1/rag", tags=["RAG"])
+# ✅ SINGLE source of truth for routes
+app.include_router(api_router, prefix="/api/v1")
 
 @app.post("/login")
 def login(form_data: OAuth2PasswordRequestForm = Depends()):
