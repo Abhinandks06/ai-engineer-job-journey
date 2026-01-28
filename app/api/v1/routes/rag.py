@@ -12,10 +12,10 @@ from app.rag_basics.llm_service import LLMService
 from app.auth import get_current_user
 from app.policy import check_upload_quota, check_query_rate
 from app.evaluation import log_retrieval_metrics, log_answer_outcome
-import os
+
 
 DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
-MIN_SIMILARITY_SCORE = float(os.getenv("MIN_SIMILARITY_SCORE", 0.15))
+MIN_SIMILARITY_SCORE = float(os.getenv("MIN_SIMILARITY_SCORE", 0.4))
 TOP_K = int(os.getenv("TOP_K", 5))
 
 
@@ -90,11 +90,10 @@ def get_user_vector_store(user_id: str) -> Optional[FAISSVectorStore]:
     return None
 
 
-
-
-
 def is_refusal(answer: str) -> bool:
-    return answer.strip().lower().startswith("i don't know")
+    normalized = answer.strip().lower()
+    return "i don't know based on the provided context" in normalized
+
 
 
 def normalize_question(question: str) -> str:
@@ -120,9 +119,6 @@ def normalize_question(question: str) -> str:
 
 
 def deduplicate_chunks(retrieved: list) -> list:
-    """
-    Keep only the highest-score chunk per (doc_id, page).
-    """
     best_per_page = {}
 
     for r in retrieved:
@@ -172,22 +168,17 @@ async def upload_pdf(
 
     with lock:
         vector_store = get_user_vector_store(user_id)
-
         if vector_store is None:
             vector_store = FAISSVectorStore(embedding_dim=embeddings.shape[1])
             vector_stores[user_id] = vector_store
 
         vector_store.add_embeddings(embeddings, chunks)
-
         index_path, metadata_path = get_user_vector_paths(user_id)
         vector_store.save(index_path, metadata_path)
 
     background_tasks.add_task(ingest_pdf_for_user, user_id, file_path)
 
-    return {
-        "message": "PDF upload received. Indexing in progress.",
-        "file": file.filename,
-    }
+    return {"message": "PDF upload received. Indexing in progress."}
 
 
 # =========================
@@ -201,24 +192,16 @@ async def ask_question(
     current_user: dict = Depends(get_current_user),
 ):
     user_id = current_user["username"]
-
     check_query_rate(user_id)
 
     vector_store = get_user_vector_store(user_id)
     if vector_store is None:
-        raise HTTPException(
-            status_code=400,
-            detail="No documents indexed yet for this user",
-        )
+        raise HTTPException(status_code=400, detail="No documents indexed yet")
 
     normalized_question = normalize_question(question)
-    if normalized_question != question:
-        print(f"[RAG INTENT NORMALIZED] '{question}' → '{normalized_question}'")
-
     query_embedding = embedding_service.embed_query(normalized_question)
 
-    lock = get_user_lock(user_id)
-    with lock:
+    with get_user_lock(user_id):
         retrieved = vector_store.search(query_embedding, top_k=TOP_K)
 
     retrieved = deduplicate_chunks(retrieved)
@@ -230,27 +213,28 @@ async def ask_question(
         threshold=MIN_SIMILARITY_SCORE,
     )
 
-    filtered = [
-        r for r in retrieved
-        if r["score"] >= MIN_SIMILARITY_SCORE
-    ]
+    # 🔹 Threshold filter
+    filtered = [r for r in retrieved if r["score"] >= MIN_SIMILARITY_SCORE]
 
+    # 🔹 No chunks → immediate refusal
+    if not filtered:
+        answer = "I don't know based on the provided context."
+        log_answer_outcome(user_id, question, answer)
+        return {"question": question, "answer": answer, "sources": []}
+
+    # 🔹 Confidence gate (Step 3)
+    avg_score = sum(r["score"] for r in filtered) / len(filtered)
+    if avg_score < 0.5:
+        answer = "I don't know based on the provided context."
+        log_answer_outcome(user_id, question, answer)
+        return {"question": question, "answer": answer, "sources": []}
+
+    # 🔹 Optional doc filter
     if doc_id:
         filtered = [
             r for r in filtered
             if r["chunk"]["metadata"].get("doc_id") == doc_id
         ]
-
-    if not filtered:
-        answer = "I don't know based on the provided context."
-
-        log_answer_outcome(user_id, question, answer)
-
-        return {
-            "question": question,
-            "answer": answer,
-            "sources": [],
-        }
 
     final_chunks = [r["chunk"] for r in filtered]
 
@@ -260,16 +244,17 @@ async def ask_question(
     )
 
     if is_refusal(answer):
-        log_answer_outcome(user_id, question, answer)
+        clean_answer = "I don't know based on the provided context."
+        log_answer_outcome(user_id, question, clean_answer)
         return {
             "question": question,
-            "answer": answer,
+            "answer": clean_answer,
             "sources": [],
         }
 
     unique_sources = {
-        (chunk["metadata"]["source"], chunk["metadata"]["page"]): chunk["metadata"]
-        for chunk in final_chunks
+        (c["metadata"]["source"], c["metadata"]["page"]): c["metadata"]
+        for c in final_chunks
     }
 
     log_answer_outcome(user_id, question, answer)
@@ -282,71 +267,12 @@ async def ask_question(
 
 
 # =========================
-# Debug endpoint (dev-only)
-# =========================
-
-@router.post("/debug/ask")
-async def debug_ask(
-    question: str,
-    doc_id: Optional[str] = None,
-    current_user: dict = Depends(get_current_user),
-):
-    if not DEBUG_MODE:
-        raise HTTPException(status_code=404, detail="Not found")
-
-    user_id = current_user["username"]
-
-    vector_store = get_user_vector_store(user_id)
-    if vector_store is None:
-        raise HTTPException(
-            status_code=400,
-            detail="No documents indexed yet for this user",
-        )
-
-    normalized_question = normalize_question(question)
-    if normalized_question != question:
-        print(f"[RAG INTENT NORMALIZED] '{question}' → '{normalized_question}'")
-
-    query_embedding = embedding_service.embed_query(normalized_question)
-
-    lock = get_user_lock(user_id)
-    with lock:
-        retrieved = vector_store.search(query_embedding, top_k=TOP_K)
-
-    retrieved = deduplicate_chunks(retrieved)
-
-    if doc_id:
-        retrieved = [
-            r for r in retrieved
-            if r["chunk"]["metadata"].get("doc_id") == doc_id
-        ]
-
-    debug_chunks = []
-    for r in retrieved:
-        debug_chunks.append({
-            "score": r["score"],
-            "passed_threshold": r["score"] >= MIN_SIMILARITY_SCORE,
-            "text_preview": r["chunk"]["text"][:300],
-            "metadata": r["chunk"]["metadata"],
-        })
-
-    return {
-        "question": question,
-        "threshold": MIN_SIMILARITY_SCORE,
-        "top_k": 5,
-        "retrieved": debug_chunks,
-        "passed_any": any(c["passed_threshold"] for c in debug_chunks),
-    }
-
-
-# =========================
 # Background ingestion
 # =========================
 
 def ingest_pdf_for_user(user_id: str, file_path: str):
     loader = PDFLoader()
     documents = loader.load(file_path)
-
     chunks = chunker.chunk_documents(documents)
     if not chunks:
         return
@@ -354,16 +280,12 @@ def ingest_pdf_for_user(user_id: str, file_path: str):
     texts = [chunk["text"] for chunk in chunks]
     embeddings = embedding_service.embed_texts(texts)
 
-    lock = get_user_lock(user_id)
-
-    with lock:
+    with get_user_lock(user_id):
         vector_store = get_user_vector_store(user_id)
-
         if vector_store is None:
             vector_store = FAISSVectorStore(embedding_dim=embeddings.shape[1])
             vector_stores[user_id] = vector_store
 
         vector_store.add_embeddings(embeddings, chunks)
-
         index_path, metadata_path = get_user_vector_paths(user_id)
         vector_store.save(index_path, metadata_path)

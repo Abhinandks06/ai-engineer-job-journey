@@ -11,7 +11,28 @@ from app.rag_eval.rag_adapters import (
     generate_answer_adapter,
 )
 
+
+def user_has_required_sources(retrieved_chunks, required_sources):
+    if not required_sources:
+        return True
+
+    present_sources = {
+        c["source"].lower() for c in retrieved_chunks
+    }
+
+    for required in required_sources:
+        required = required.lower()
+        for present in present_sources:
+            if required in present:
+                return True
+
+    return False
+
+
+
 router = APIRouter(prefix="/rag/eval", tags=["RAG Evaluation"])
+
+
 @router.post("/")
 def evaluate_rag(
     current_user: dict = Depends(get_current_user),
@@ -23,12 +44,26 @@ def evaluate_rag(
 
     for item in dataset:
         question = item["question"]
+        required_sources = item.get("required_sources", [])
 
         # 1️⃣ Retrieve chunks (REAL pipeline)
         retrieved_chunks = retrieve_chunks_adapter(
             question=question,
             user_id=user_id,
         )
+
+        # 🚦 NEW: document-aware evaluation gate
+        if not user_has_required_sources(
+            retrieved_chunks,
+            required_sources,
+        ):
+            results.append({
+                "question_id": item["id"],
+                "question": question,
+                "skipped": True,
+                "reason": "required_documents_not_present",
+            })
+            continue
 
         # 2️⃣ Evaluate retrieval quality
         retrieval_result = evaluate_retrieval(
@@ -66,8 +101,13 @@ def evaluate_rag(
             "total": len(results),
             "passed": sum(
                 1 for r in results
-                if r["retrieval"]["passed"]
+                if not r.get("skipped")
+                and r["retrieval"]["passed"]
                 and r["faithfulness"]["faithful"]
+            ),
+            "skipped": sum(
+                1 for r in results
+                if r.get("skipped")
             ),
         },
         "details": results,
