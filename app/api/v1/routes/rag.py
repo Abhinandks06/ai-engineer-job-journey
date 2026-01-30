@@ -1,4 +1,4 @@
-from fastapi import APIRouter, UploadFile, File, HTTPException, BackgroundTasks, Depends
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
 import os
 from typing import Optional
 from threading import Lock
@@ -81,7 +81,6 @@ def get_user_vector_store(user_id: str) -> Optional[FAISSVectorStore]:
         return vector_stores[user_id]
 
     index_path, metadata_path = get_user_vector_paths(user_id)
-
     if os.path.exists(index_path) and os.path.exists(metadata_path):
         store = FAISSVectorStore.load(index_path, metadata_path)
         vector_stores[user_id] = store
@@ -90,10 +89,13 @@ def get_user_vector_store(user_id: str) -> Optional[FAISSVectorStore]:
     return None
 
 
+# =========================
+# Helpers
+# =========================
+
 def is_refusal(answer: str) -> bool:
     normalized = answer.strip().lower()
     return "i don't know based on the provided context" in normalized
-
 
 
 def normalize_question(question: str) -> str:
@@ -101,12 +103,8 @@ def normalize_question(question: str) -> str:
 
     summary_triggers = [
         "what is the content",
-        "what is the content in this pdf",
-        "what is the content in the pdf",
         "what is this pdf about",
-        "explain this pdf",
         "explain this document",
-        "summarize this pdf",
         "summarize this document",
         "what is in this document",
     ]
@@ -137,12 +135,10 @@ def deduplicate_chunks(retrieved: list) -> list:
 
 @router.post("/upload-pdf")
 async def upload_pdf(
-    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     current_user: dict = Depends(get_current_user),
 ):
     user_id = current_user["username"]
-
     check_upload_quota(user_id)
 
     if not file.filename.lower().endswith(".pdf"):
@@ -161,12 +157,10 @@ async def upload_pdf(
     if not chunks:
         raise HTTPException(status_code=400, detail="No text found in PDF")
 
-    texts = [chunk["text"] for chunk in chunks]
+    texts = [c["text"] for c in chunks]
     embeddings = embedding_service.embed_texts(texts)
 
-    lock = get_user_lock(user_id)
-
-    with lock:
+    with get_user_lock(user_id):
         vector_store = get_user_vector_store(user_id)
         if vector_store is None:
             vector_store = FAISSVectorStore(embedding_dim=embeddings.shape[1])
@@ -176,9 +170,7 @@ async def upload_pdf(
         index_path, metadata_path = get_user_vector_paths(user_id)
         vector_store.save(index_path, metadata_path)
 
-    background_tasks.add_task(ingest_pdf_for_user, user_id, file_path)
-
-    return {"message": "PDF upload received. Indexing in progress."}
+    return {"message": "PDF uploaded and indexed successfully."}
 
 
 # =========================
@@ -213,44 +205,40 @@ async def ask_question(
         threshold=MIN_SIMILARITY_SCORE,
     )
 
-    # 🔹 Threshold filter
+    # Threshold filter
     filtered = [r for r in retrieved if r["score"] >= MIN_SIMILARITY_SCORE]
 
-    # 🔹 No chunks → immediate refusal
-    if not filtered:
-        answer = "I don't know based on the provided context."
-        log_answer_outcome(user_id, question, answer)
-        return {"question": question, "answer": answer, "sources": []}
-
-    # 🔹 Confidence gate (Step 3)
-    avg_score = sum(r["score"] for r in filtered) / len(filtered)
-    if avg_score < 0.5:
-        answer = "I don't know based on the provided context."
-        log_answer_outcome(user_id, question, answer)
-        return {"question": question, "answer": answer, "sources": []}
-
-    # 🔹 Optional doc filter
+    # Optional document filter
     if doc_id:
         filtered = [
             r for r in filtered
             if r["chunk"]["metadata"].get("doc_id") == doc_id
         ]
 
+    if not filtered:
+        answer = "I don't know based on the provided context."
+        log_answer_outcome(user_id, question, answer)
+        return {"question": question, "answer": answer, "sources": []}
+
+    # NOTE:
+    # We allow broad but semantically related questions if retrieval confidence is high.
+    avg_score = sum(r["score"] for r in filtered) / len(filtered)
+    if avg_score < 0.5:
+        answer = "I don't know based on the provided context."
+        log_answer_outcome(user_id, question, answer)
+        return {"question": question, "answer": answer, "sources": []}
+
     final_chunks = [r["chunk"] for r in filtered]
 
     answer = llm_service.generate_answer(
         question,
-        [chunk["text"] for chunk in final_chunks],
+        [c["text"] for c in final_chunks],
     )
 
     if is_refusal(answer):
-        clean_answer = "I don't know based on the provided context."
-        log_answer_outcome(user_id, question, clean_answer)
-        return {
-            "question": question,
-            "answer": clean_answer,
-            "sources": [],
-        }
+        clean = "I don't know based on the provided context."
+        log_answer_outcome(user_id, question, clean)
+        return {"question": question, "answer": clean, "sources": []}
 
     unique_sources = {
         (c["metadata"]["source"], c["metadata"]["page"]): c["metadata"]
@@ -264,28 +252,3 @@ async def ask_question(
         "answer": answer,
         "sources": list(unique_sources.values()),
     }
-
-
-# =========================
-# Background ingestion
-# =========================
-
-def ingest_pdf_for_user(user_id: str, file_path: str):
-    loader = PDFLoader()
-    documents = loader.load(file_path)
-    chunks = chunker.chunk_documents(documents)
-    if not chunks:
-        return
-
-    texts = [chunk["text"] for chunk in chunks]
-    embeddings = embedding_service.embed_texts(texts)
-
-    with get_user_lock(user_id):
-        vector_store = get_user_vector_store(user_id)
-        if vector_store is None:
-            vector_store = FAISSVectorStore(embedding_dim=embeddings.shape[1])
-            vector_stores[user_id] = vector_store
-
-        vector_store.add_embeddings(embeddings, chunks)
-        index_path, metadata_path = get_user_vector_paths(user_id)
-        vector_store.save(index_path, metadata_path)
